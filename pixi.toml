@@ -1,0 +1,166 @@
+[workspace]
+name = "cycamore"
+description = "Development environment for building and testing Cycamore"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+
+# Cycamore main needs features of Cyclus that are newer than the Cyclus v1.6.0
+# release on conda-forge (e.g. src/toolkit/position.cycpp.h and
+# cmake/CyclusBuildSetup.cmake), so Cyclus is built from source with the
+# 'build-cyclus' task instead of being a dependency. The dependencies below are
+# those of the pixi.toml of Cyclus, which are what Cyclus needs to be built and
+# which also cover what Cycamore needs. Once a Cyclus release that Cycamore
+# main can be built with is on conda-forge, they can be replaced with the
+# cyclus package, and the fetch-cyclus and build-cyclus tasks removed.
+[dependencies]
+# Build tools
+c-compiler = ">=2.0.0,<3"
+cxx-compiler = ">=2.0.0,<3"
+cmake = ">=4.4.3,<5"
+make = ">=4.4.1,<5"
+pkg-config = ">=0.29.2,<0.30"
+# C++ library dependencies
+libboost-devel = ">=1.92.0,<2"
+coincbc = ">=2.10.13,<3"
+glib = ">=2.90.0,<3"
+hdf5 = ">=2.2.0,<3"
+liblapack = ">=3.11.0,<4"
+# The headers and pkg-config file of libxml2 are in libxml2-devel as of
+# libxml2 2.14 on conda-forge, and the headers and pkg-config file of libxml++
+# are in libxmlpp-devel as of build 4 of libxmlpp-4.0 (libxmlpp-devel 5.x is
+# libxml++-5.0).
+libxml2-devel = ">=2.15.4,<3"
+libxmlpp-devel = ">=4.0.2,<5"
+pcre = ">=8.45,<9"
+sqlite = ">=3.53.4,<4"
+# Python dependencies
+python = ">=3.12.0,<3.16"
+# Cyclus embeds the Python interpreter, so it links to the libpython shared
+# library. As of Python 3.15 on conda-forge the python package no longer
+# installs it, cf. https://conda-forge.org/blog/2026/09/03/python-315/
+libpython = ">=3.12.0,<3.16"
+cython = ">=3.1.0,<4"
+jinja2 = ">=3.1.6,<4"
+pandas = ">=3.0.6,<4"
+pip = ">=26.2.1,<27"
+pprintpp = ">=0.4.0,<0.5"
+setuptools = ">=84.0.0,<85"
+websockets = ">=17.2,<18"
+
+[target.osx.dependencies]
+# Clang does not ship an OpenMP runtime, which is needed for --parallel builds
+llvm-openmp = ">=23.1.2,<24"
+
+[target.osx.activation.env]
+# The conda-forge clang packages do not provide cc, c++, or cpp, so without
+# these CMake and cycpp.py would use the Xcode toolchain instead.
+CC = "clang"
+CXX = "clang++"
+CPP = "clang-cpp"
+# The shared libraries are linked with -flat_namespace, which makes the linker
+# load the dependencies of the libraries being linked against. Some of those
+# are referenced through @rpath (e.g. libquadmath from libgfortran) and are
+# only found if the environment's library directory is searched.
+LDFLAGS = "-L$CONDA_PREFIX/lib"
+
+[activation.env]
+# Cyclus and Cycamore are both installed into the workspace's install/
+# directory, not into the Pixi environment, so that the environment only ever
+# contains what is in pixi.lock and removing install/ ('pixi run uninstall')
+# leaves nothing behind. Installing them into the same prefix is also what
+# CMakeLists.txt expects, as it looks for the CMake modules of Cyclus in
+# ${CMAKE_INSTALL_PREFIX}/share/cyclus/cmake, and it means that Cyclus finds
+# the Cycamore agents in its own lib/cyclus without CYCLUS_PATH being set.
+CYCAMORE_INSTALL_PREFIX = "$PIXI_PROJECT_ROOT/install"
+# The Cyclus source is cloned into the workspace by the fetch-cyclus task.
+CYCLUS_SOURCE_DIR = "$PIXI_PROJECT_ROOT/cyclus-src"
+# The build directories are per Pixi environment, as CMake records the
+# absolute paths of the compilers and of cmake itself in them at configure
+# time, and so a build directory can only be reused from the environment that
+# configured it. The build directory of Cyclus has to be directly under the
+# top level of its repository, as its build refers to the sources relative to
+# it (e.g. ../cyclus/system.py in cli/sidecar.py).
+CYCAMORE_BUILD_DIR = "$PIXI_PROJECT_ROOT/build-$PIXI_ENVIRONMENT_NAME"
+CYCLUS_BUILD_DIR = "$CYCLUS_SOURCE_DIR/build-$PIXI_ENVIRONMENT_NAME"
+PATH = "$CYCAMORE_INSTALL_PREFIX/bin:$PATH"
+# Relocate the Python user site, which is where Cyclus installs its Python
+# package by default, from ~/.local to the install prefix.
+PYTHONUSERBASE = "$CYCAMORE_INSTALL_PREFIX"
+
+[tasks.fetch-cyclus]
+# The clone is only made if it does not exist yet, so to change the Cyclus
+# version afterwards either check out another ref in cyclus-src/ or remove it.
+# git is not a dependency of the workspace, as no git on conda-forge for
+# osx-arm64 can be installed with the libglib that libxmlpp-devel needs (they
+# require conflicting versions of libintl and pcre2), so the git of the system
+# is used.
+args = [{ arg = "ref", default = "main" }]
+cmd = """
+test -d "$CYCLUS_SOURCE_DIR" || \
+git clone --branch "{{ ref }}" https://github.com/cyclus/cyclus.git "$CYCLUS_SOURCE_DIR"
+"""
+description = "Clone a branch or tag of Cyclus (default: main) into cyclus-src/"
+
+[tasks.build-cyclus]
+# install.py builds with a single job unless given -j, so use 80% of the CPUs
+# of the machine. The user site has to exist before the install, as the
+# install step that symlinks the Cython modules into it does not create it and
+# its failure is not treated as an error. Cyclus is built with Coin-Cbc
+# (--allow-milps) so that the agents and tests of Cycamore that use MILPs are
+# built and run, and with OpenMP (--parallel) for multithreaded simulation
+# support.
+cmd = """
+mkdir -p "$(python -m site --user-site)" && \
+python install.py --build-dir "$CYCLUS_BUILD_DIR" --prefix "$CYCAMORE_INSTALL_PREFIX" --allow-milps --parallel \
+-j "$(python -c "import os; print(max(1, int(os.cpu_count() * 0.8)))")"
+"""
+cwd = "cyclus-src"
+depends-on = ["fetch-cyclus"]
+description = "Build Cyclus and install it into the workspace's install/ directory"
+
+[tasks.build]
+# Extra arguments are forwarded to install.py, e.g. 'pixi run build -j 4'.
+# install.py builds with a single job unless given -j, so default to using 80%
+# of the CPUs of the machine. A -j given on the command line comes later in
+# the arguments and so takes precedence.
+cmd = """
+python install.py --build_dir "$CYCAMORE_BUILD_DIR" --prefix "$CYCAMORE_INSTALL_PREFIX" \
+--cyclus-root "$CYCAMORE_INSTALL_PREFIX" --allow-milps \
+-j "$(python -c "import os; print(max(1, int(os.cpu_count() * 0.8)))")"
+"""
+description = "Build Cycamore and install it into the workspace's install/ directory (requires 'pixi run build-cyclus')"
+
+[tasks.uninstall]
+# The build directories are kept, so the build tasks only have to install
+# again.
+cmd = 'rm -rf "$CYCAMORE_INSTALL_PREFIX"'
+description = "Uninstall Cyclus and Cycamore by removing the workspace's install/ directory"
+
+[feature.test.dependencies]
+numpy = ">=2.5.4,<3"
+pytables = ">=3.11.1,<4"
+pytest = ">=9.2.0,<10"
+
+[feature.test.tasks.test-unit]
+cmd = "cycamore_unit_tests"
+description = "Run the C++ unit tests (requires 'pixi run build')"
+
+[feature.test.tasks.test-python]
+cmd = "pytest"
+cwd = "tests"
+description = "Run the Python tests (requires 'pixi run build')"
+
+[feature.test.tasks.test]
+depends-on = ["test-unit", "test-python"]
+description = "Run all tests (requires 'pixi run build')"
+
+[feature.test.tasks.start]
+depends-on = ["uninstall", "build-cyclus", "build", "test"]
+description = "Build Cyclus and Cycamore from a clean install and run the tests"
+
+[environments]
+# Both environments are in the same solve group so that they use the same
+# versions of the dependencies they share. The default environment has to be
+# listed for this, as it is not part of any solve group otherwise.
+default = { solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }

@@ -16,3 +16,12 @@ cycamore_version.h
 src/version.cc.in
 # Rever
 rever/
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Pixi workspace build products and Cyclus clone
+build-*/
+install/
+cyclus-src/
